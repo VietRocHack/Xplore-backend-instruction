@@ -9,54 +9,39 @@ from anthropic import Anthropic
 
 # Load environment variables
 load_dotenv()
-GRID_SIZE = 75
-def add_chess_grid_to_image(image, grid_size=GRID_SIZE):
+
+# Constants
+GRID_SIZE = 50
+PADDING_TOP = 100
+PADDING_LEFT = 100
+
+def add_padding_to_image(image, padding_top=PADDING_TOP, padding_left=PADDING_LEFT):
     width, height = image.size
-    cols = width // grid_size
-    rows = height // grid_size
+    new_width = width + padding_left
+    new_height = height + padding_top
     
-    draw = ImageDraw.Draw(image)
+    # Create a new white image with padding
+    padded_image = Image.new('RGB', (new_width, new_height), color='white')
+    padded_image.paste(image, (padding_left, padding_top))
     
-    # Try to load a font, fall back to default if not available
-    try:
-        font = ImageFont.truetype("arial.ttf", 20)
-    except IOError:
-        font = ImageFont.load_default()
+    return padded_image, width // GRID_SIZE, height // GRID_SIZE
 
-    # Draw vertical lines and label them
-    for i in range(cols + 1):
-        x = i * grid_size
-        draw.line([(x, 0), (x, height)], fill='red', width=2)
-        if i < cols:
-            label = string.ascii_uppercase[i]
-            draw.text((x + 15, 5), label, fill='red', font=font)
-
-    # Draw horizontal lines and label them
-    for i in range(rows + 1):
-        y = i * grid_size
-        draw.line([(0, y), (width, y)], fill='red', width=2)
-        if i < rows:
-            label = str(i + 1)
-            draw.text((5, y + 15), label, fill='red', font=font)
-
-    return cols, rows
-
-def chess_to_pixel(chess_coord, grid_size=GRID_SIZE):
+def chess_to_pixel(chess_coord):
     col = string.ascii_uppercase.index(chess_coord[0])
     row = int(chess_coord[1:]) - 1
-    return col * grid_size + grid_size // 2, row * grid_size + grid_size // 2
+    return (col * GRID_SIZE, row * GRID_SIZE)
 
 def process_image(image_path):
     # Open and resize the image
     with Image.open(image_path) as img:
         img_resized = img.resize((1024, 768))  # XGA resolution
     
-    # Add chess grid to the image and get dimensions
-    cols, rows = add_chess_grid_to_image(img_resized)
+    # Add padding to the image and get dimensions
+    img_with_padding, cols, rows = add_padding_to_image(img_resized)
     
     # Convert the image to base64
     buffered = io.BytesIO()
-    img_resized.save(buffered, format="PNG")
+    img_with_padding.save(buffered, format="PNG")
     img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
     # Set up the Anthropic client
@@ -80,7 +65,7 @@ def process_image(image_path):
                 },
                 {
                     "type": "text",
-                    "text": f"Analyze this image with the chess-like grid overlay. Identify the Phone app and provide its location using the grid coordinates (e.g., B2). Also, give a brief description of its appearance. Format your response as a JSON object with fields 'grid_location' and 'description'."
+                    "text": f"Analyze this image as if it had a chess-like grid overlay with {cols} columns (A-{string.ascii_uppercase[cols-1]}) and {rows} rows (1-{rows}). Each grid cell is {GRID_SIZE}x{GRID_SIZE} pixels. Identify all interesting or notable elements in the image. For each element, provide its location using the grid coordinates (e.g., ['B2', 'B3'] for an element spanning two cells) and a brief description. Format your response as a JSON object with an 'elements' array, where each element has 'grid_locations' (an array of grid coordinates) and 'description' fields. Limit your response to the 5 most interesting or notable elements."
                 }
             ]
         }
@@ -96,14 +81,31 @@ def process_image(image_path):
 
     # Parse the JSON response
     result = json.loads(response.content[0].text)
-    return result, img_resized
+    return result, img_resized  # Return the resized image without padding
 
-def draw_circle_on_image(image, chess_coord):
+def draw_ovals_on_image(image, elements):
     draw = ImageDraw.Draw(image)
-    x, y = chess_to_pixel(chess_coord)
-    circle_radius = 100
-    draw.ellipse((x-circle_radius, y-circle_radius, x+circle_radius, y+circle_radius), 
-                 outline='red', width=3)
+    for element in elements:
+        min_col = min(string.ascii_uppercase.index(loc[0]) for loc in element['grid_locations'])
+        max_col = max(string.ascii_uppercase.index(loc[0]) for loc in element['grid_locations'])
+        min_row = min(int(loc[1:]) - 1 for loc in element['grid_locations'])
+        max_row = max(int(loc[1:]) - 1 for loc in element['grid_locations'])
+        
+        # Calculate coordinates without padding
+        top_left = (min_col * GRID_SIZE, min_row * GRID_SIZE)
+        bottom_right = ((max_col + 1) * GRID_SIZE, (max_row + 1) * GRID_SIZE)
+        
+        # Calculate center and radii for the oval
+        EXTRA_PADDING = 50
+        center_x = (top_left[0] + bottom_right[0]) / 2
+        center_y = (top_left[1] + bottom_right[1]) / 2
+        radius_x = (bottom_right[0] - top_left[0]) / 2 + EXTRA_PADDING
+        radius_y = (bottom_right[1] - top_left[1]) / 2 + EXTRA_PADDING
+        
+        # Draw the oval
+        draw.ellipse([center_x - radius_x, center_y - radius_y, 
+                      center_x + radius_x, center_y + radius_y], 
+                     outline='red', width=3)
     return image
 
 # Example usage
@@ -114,11 +116,11 @@ if __name__ == "__main__":
         result, img = process_image(image_path)
         print(json.dumps(result, indent=2))
 
-        # Draw circle on the image
-        if 'grid_location' in result:
-            img_with_circle = draw_circle_on_image(img, result['grid_location'])
-            img_with_circle.show()
+        # Draw ovals on the image
+        if 'elements' in result:
+            img_with_ovals = draw_ovals_on_image(img, result['elements'])
+            img_with_ovals.show()
         else:
-            print("Grid location not found in the API response.")
+            print("No elements found in the API response.")
     except Exception as e:
         print(f"An error occurred: {str(e)}")
